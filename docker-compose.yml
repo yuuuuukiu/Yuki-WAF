@@ -1,0 +1,113 @@
+# ============================================================
+#  Yuki-WAF  — Development Environment
+#  Usage:  docker compose up -d
+# ============================================================
+
+services:
+
+  # --------------- OpenResty Gateway ---------------
+  gateway:
+    image: openresty/openresty:1.25.3.2-alpine
+    container_name: yuki-gateway
+    ports:
+      - "8080:80"        # HTTP  入口
+      - "8443:443"       # HTTPS 入口（后续挂证书）
+    volumes:
+      - ./gateway/conf:/usr/local/openresty/nginx/conf:ro
+      - ./gateway/lua:/usr/local/openresty/lua:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - yuki-net
+    restart: unless-stopped
+
+  # --------------- Kafka (KRaft, no ZooKeeper) ---------------
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: yuki-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft 模式 — 无需 ZooKeeper
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # 自动创建 Topic
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Topic 默认分区 & 副本数（开发环境 1 副本够用）
+      KAFKA_CFG_NUM_PARTITIONS: "3"
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
+    volumes:
+      - kafka-data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - yuki-net
+    restart: unless-stopped
+
+  # --------------- Redis 7 ---------------
+  redis:
+    image: redis:7-alpine
+    container_name: yuki-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - yuki-net
+    restart: unless-stopped
+
+  # --------------- MySQL 8 ---------------
+  mysql:
+    image: mysql:8.0
+    container_name: yuki-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-yuki_root_2024}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-yuki_waf}
+      MYSQL_USER: ${MYSQL_USER:-yuki}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-yuki_pass_2024}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infra/migrations:/docker-entrypoint-initdb.d:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-yuki_root_2024}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - yuki-net
+    restart: unless-stopped
+
+volumes:
+  kafka-data:
+  redis-data:
+  mysql-data:
+
+networks:
+  yuki-net:
+    driver: bridge
